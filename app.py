@@ -169,6 +169,12 @@ elif page == "📋 Schulden":
         st.info("Geen schulden gevonden.")
     else:
         st.caption(f"{len(debts)} schuldeisers")
+
+        # Taken 1x ophalen en per schuld groeperen (i.p.v. per schuld opnieuw opvragen)
+        tasks_by_debt = {}
+        for t in db.get_tasks():
+            tasks_by_debt.setdefault(t["related_debt_id"], []).append(t)
+
         for debt in debts:
             last_contact = debt["last_contact"].strftime("%d-%m-%Y") if debt["last_contact"] else "—"
             header = (
@@ -240,7 +246,7 @@ elif page == "📋 Schulden":
                             st.rerun()
 
                 with tab_taken:
-                    related_tasks = [t for t in db.get_tasks() if t["related_debt_id"] == debt["id"]]
+                    related_tasks = tasks_by_debt.get(debt["id"], [])
                     if related_tasks:
                         for t in related_tasks:
                             status_icon = "✅" if t["status"] == "Done" else "⬜"
