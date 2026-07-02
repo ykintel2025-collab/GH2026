@@ -112,6 +112,7 @@ def add_debt(creditor_name, total_amount, current_amount, priority, status="Open
     conn.commit()
     cur.close()
     conn.close()
+    st.cache_data.clear()
 
 
 def update_debt(debt_id, **fields):
@@ -129,6 +130,7 @@ def update_debt(debt_id, **fields):
     conn.commit()
     cur.close()
     conn.close()
+    st.cache_data.clear()
 
 
 def delete_debt(debt_id):
@@ -138,8 +140,10 @@ def delete_debt(debt_id):
     conn.commit()
     cur.close()
     conn.close()
+    st.cache_data.clear()
 
 
+@st.cache_data(ttl=30, show_spinner=False)
 def get_debts(status=None):
     conn = get_connection()
     cur = _dict_cursor(conn)
@@ -171,8 +175,10 @@ def add_debt_log(debt_id, note, logged_by, log_date=None):
     conn.commit()
     cur.close()
     conn.close()
+    st.cache_data.clear()
 
 
+@st.cache_data(ttl=30, show_spinner=False)
 def get_debt_logs(debt_id):
     conn = get_connection()
     cur = _dict_cursor(conn)
@@ -197,8 +203,10 @@ def add_income(source, amount, income_type, entered_by, income_date=None):
     conn.commit()
     cur.close()
     conn.close()
+    st.cache_data.clear()
 
 
+@st.cache_data(ttl=30, show_spinner=False)
 def get_income():
     conn = get_connection()
     cur = _dict_cursor(conn)
@@ -216,6 +224,7 @@ def delete_income(income_id):
     conn.commit()
     cur.close()
     conn.close()
+    st.cache_data.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +241,7 @@ def add_pipeline(company, status, potential_value, next_action, owner):
     conn.commit()
     cur.close()
     conn.close()
+    st.cache_data.clear()
 
 
 def update_pipeline(pipeline_id, **fields):
@@ -249,6 +259,7 @@ def update_pipeline(pipeline_id, **fields):
     conn.commit()
     cur.close()
     conn.close()
+    st.cache_data.clear()
 
 
 def delete_pipeline(pipeline_id):
@@ -258,8 +269,10 @@ def delete_pipeline(pipeline_id):
     conn.commit()
     cur.close()
     conn.close()
+    st.cache_data.clear()
 
 
+@st.cache_data(ttl=30, show_spinner=False)
 def get_pipeline():
     conn = get_connection()
     cur = _dict_cursor(conn)
@@ -295,8 +308,10 @@ def add_payment(debt_id, amount, logged_by, payment_date=None):
     conn.commit()
     cur.close()
     conn.close()
+    st.cache_data.clear()
 
 
+@st.cache_data(ttl=30, show_spinner=False)
 def get_payments(debt_id):
     conn = get_connection()
     cur = _dict_cursor(conn)
@@ -307,6 +322,7 @@ def get_payments(debt_id):
     return rows
 
 
+@st.cache_data(ttl=30, show_spinner=False)
 def get_total_paid():
     conn = get_connection()
     cur = conn.cursor()
@@ -332,6 +348,7 @@ def add_task(title, assigned_to, created_by, description=None, due_date=None, re
     conn.commit()
     cur.close()
     conn.close()
+    st.cache_data.clear()
 
 
 def update_task(task_id, **fields):
@@ -349,6 +366,7 @@ def update_task(task_id, **fields):
     conn.commit()
     cur.close()
     conn.close()
+    st.cache_data.clear()
 
 
 def delete_task(task_id):
@@ -358,8 +376,10 @@ def delete_task(task_id):
     conn.commit()
     cur.close()
     conn.close()
+    st.cache_data.clear()
 
 
+@st.cache_data(ttl=30, show_spinner=False)
 def get_tasks(assigned_to=None, status=None):
     conn = get_connection()
     cur = _dict_cursor(conn)
@@ -384,6 +404,7 @@ def get_tasks(assigned_to=None, status=None):
     return rows
 
 
+@st.cache_data(ttl=15, show_spinner=False)
 def get_dashboard_tasks(user):
     """Taken voor het dashboard: vandaag, achterstallig, en binnenkort (7 dagen) voor deze gebruiker."""
     conn = get_connection()
@@ -409,6 +430,7 @@ def get_dashboard_tasks(user):
 # ACTIVITEIT (voor dashboard)
 # ---------------------------------------------------------------------------
 
+@st.cache_data(ttl=15, show_spinner=False)
 def get_recent_activity(limit=8):
     """Combineert recente communicatie-logs en betalingen tot één activiteitenlijst."""
     conn = get_connection()
@@ -446,6 +468,7 @@ def get_recent_activity(limit=8):
 # LIQUIDITEIT / TOTALEN
 # ---------------------------------------------------------------------------
 
+@st.cache_data(ttl=15, show_spinner=False)
 def get_totals():
     conn = get_connection()
     cur = conn.cursor()
