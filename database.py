@@ -32,6 +32,16 @@ def init_db():
         )
     """)
 
+    # NAW- en contactgegevens toevoegen aan bestaande installaties (veilig, idempotent)
+    for col_def in [
+        "address TEXT",
+        "postal_code TEXT",
+        "city TEXT",
+        "phone TEXT",
+        "email TEXT",
+    ]:
+        cur.execute(f"ALTER TABLE debts ADD COLUMN IF NOT EXISTS {col_def}")
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS debt_logs (
             id SERIAL PRIMARY KEY,
@@ -88,6 +98,17 @@ def init_db():
         )
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS message_templates (
+            id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            channel TEXT NOT NULL,
+            subject TEXT,
+            body TEXT NOT NULL,
+            created_by TEXT
+        )
+    """)
+
     conn.commit()
     cur.close()
     conn.close()
@@ -101,13 +122,16 @@ def _dict_cursor(conn):
 # DEBTS
 # ---------------------------------------------------------------------------
 
-def add_debt(creditor_name, total_amount, current_amount, priority, status="Open", last_contact=None):
+def add_debt(creditor_name, total_amount, current_amount, priority, status="Open", last_contact=None,
+             address=None, postal_code=None, city=None, phone=None, email=None):
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
-        """INSERT INTO debts (creditor_name, total_amount, current_amount, priority, status, last_contact)
-           VALUES (%s, %s, %s, %s, %s, %s)""",
-        (creditor_name, total_amount, current_amount, priority, status, last_contact or date.today()),
+        """INSERT INTO debts (creditor_name, total_amount, current_amount, priority, status, last_contact,
+                               address, postal_code, city, phone, email)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+        (creditor_name, total_amount, current_amount, priority, status, last_contact or date.today(),
+         address, postal_code, city, phone, email),
     )
     conn.commit()
     cur.close()
@@ -118,7 +142,10 @@ def add_debt(creditor_name, total_amount, current_amount, priority, status="Open
 def update_debt(debt_id, **fields):
     if not fields:
         return
-    allowed = {"creditor_name", "total_amount", "current_amount", "priority", "status", "last_contact"}
+    allowed = {
+        "creditor_name", "total_amount", "current_amount", "priority", "status", "last_contact",
+        "address", "postal_code", "city", "phone", "email",
+    }
     keys = [k for k in fields if k in allowed]
     if not keys:
         return
@@ -183,6 +210,18 @@ def get_debt_logs(debt_id):
     conn = get_connection()
     cur = _dict_cursor(conn)
     cur.execute("SELECT * FROM debt_logs WHERE debt_id = %s ORDER BY date DESC, id DESC", (debt_id,))
+    rows = [dict(r) for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return rows
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def get_all_debt_logs():
+    """Haalt ALLE communicatie-logs in één keer op (i.p.v. per schuld apart)."""
+    conn = get_connection()
+    cur = _dict_cursor(conn)
+    cur.execute("SELECT * FROM debt_logs ORDER BY date DESC, id DESC")
     rows = [dict(r) for r in cur.fetchall()]
     cur.close()
     conn.close()
@@ -316,6 +355,18 @@ def get_payments(debt_id):
     conn = get_connection()
     cur = _dict_cursor(conn)
     cur.execute("SELECT * FROM payments WHERE debt_id = %s ORDER BY date DESC, id DESC", (debt_id,))
+    rows = [dict(r) for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return rows
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def get_all_payments():
+    """Haalt ALLE betalingen in één keer op (i.p.v. per schuld apart)."""
+    conn = get_connection()
+    cur = _dict_cursor(conn)
+    cur.execute("SELECT * FROM payments ORDER BY date DESC, id DESC")
     rows = [dict(r) for r in cur.fetchall()]
     cur.close()
     conn.close()
@@ -462,6 +513,47 @@ def get_recent_activity(limit=8):
     combined = logs + payments
     combined.sort(key=lambda x: x["date"], reverse=True)
     return combined[:limit]
+
+
+# ---------------------------------------------------------------------------
+# MESSAGE TEMPLATES (standaardberichten voor mail & WhatsApp)
+# ---------------------------------------------------------------------------
+
+def add_template(name, channel, body, created_by, subject=None):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO message_templates (name, channel, subject, body, created_by) VALUES (%s, %s, %s, %s, %s)",
+        (name, channel, subject, body, created_by),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    st.cache_data.clear()
+
+
+def delete_template(template_id):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM message_templates WHERE id = %s", (template_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    st.cache_data.clear()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_templates(channel=None):
+    conn = get_connection()
+    cur = _dict_cursor(conn)
+    if channel:
+        cur.execute("SELECT * FROM message_templates WHERE channel = %s ORDER BY name", (channel,))
+    else:
+        cur.execute("SELECT * FROM message_templates ORDER BY channel, name")
+    rows = [dict(r) for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return rows
 
 
 # ---------------------------------------------------------------------------
