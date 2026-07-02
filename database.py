@@ -64,6 +64,30 @@ def init_db():
         )
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS payments (
+            id SERIAL PRIMARY KEY,
+            debt_id INTEGER NOT NULL REFERENCES debts(id) ON DELETE CASCADE,
+            amount NUMERIC NOT NULL,
+            date DATE NOT NULL,
+            logged_by TEXT
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS tasks (
+            id SERIAL PRIMARY KEY,
+            title TEXT NOT NULL,
+            description TEXT,
+            assigned_to TEXT NOT NULL,
+            due_date DATE,
+            related_debt_id INTEGER REFERENCES debts(id) ON DELETE SET NULL,
+            status TEXT NOT NULL DEFAULT 'Open',
+            created_by TEXT,
+            created_at TIMESTAMP DEFAULT now()
+        )
+    """)
+
     conn.commit()
     cur.close()
     conn.close()
@@ -244,6 +268,178 @@ def get_pipeline():
     cur.close()
     conn.close()
     return rows
+
+
+# ---------------------------------------------------------------------------
+# PAYMENTS (betalingen)
+# ---------------------------------------------------------------------------
+
+def add_payment(debt_id, amount, logged_by, payment_date=None):
+    """Registreert een betaling en trekt het bedrag automatisch af van current_amount.
+    Als de schuld daarmee op 0 (of lager) komt, wordt de status automatisch 'Paid'."""
+    payment_date = payment_date or date.today()
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO payments (debt_id, amount, date, logged_by) VALUES (%s, %s, %s, %s)",
+        (debt_id, amount, payment_date, logged_by),
+    )
+    cur.execute(
+        """UPDATE debts
+           SET current_amount = GREATEST(current_amount - %s, 0),
+               status = CASE WHEN current_amount - %s <= 0 THEN 'Paid' ELSE status END,
+               last_contact = %s
+           WHERE id = %s""",
+        (amount, amount, payment_date, debt_id),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def get_payments(debt_id):
+    conn = get_connection()
+    cur = _dict_cursor(conn)
+    cur.execute("SELECT * FROM payments WHERE debt_id = %s ORDER BY date DESC, id DESC", (debt_id,))
+    rows = [dict(r) for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return rows
+
+
+def get_total_paid():
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT COALESCE(SUM(amount), 0) FROM payments")
+    total = float(cur.fetchone()[0])
+    cur.close()
+    conn.close()
+    return total
+
+
+# ---------------------------------------------------------------------------
+# TASKS (taken / acties)
+# ---------------------------------------------------------------------------
+
+def add_task(title, assigned_to, created_by, description=None, due_date=None, related_debt_id=None):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """INSERT INTO tasks (title, description, assigned_to, due_date, related_debt_id, created_by)
+           VALUES (%s, %s, %s, %s, %s, %s)""",
+        (title, description, assigned_to, due_date, related_debt_id, created_by),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def update_task(task_id, **fields):
+    if not fields:
+        return
+    allowed = {"title", "description", "assigned_to", "due_date", "related_debt_id", "status"}
+    keys = [k for k in fields if k in allowed]
+    if not keys:
+        return
+    set_clause = ", ".join(f"{k} = %s" for k in keys)
+    values = [fields[k] for k in keys]
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(f"UPDATE tasks SET {set_clause} WHERE id = %s", (*values, task_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def delete_task(task_id):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM tasks WHERE id = %s", (task_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def get_tasks(assigned_to=None, status=None):
+    conn = get_connection()
+    cur = _dict_cursor(conn)
+    query = """
+        SELECT t.*, d.creditor_name
+        FROM tasks t
+        LEFT JOIN debts d ON d.id = t.related_debt_id
+        WHERE 1=1
+    """
+    params = []
+    if assigned_to:
+        query += " AND t.assigned_to = %s"
+        params.append(assigned_to)
+    if status:
+        query += " AND t.status = %s"
+        params.append(status)
+    query += " ORDER BY t.due_date ASC NULLS LAST, t.id DESC"
+    cur.execute(query, params)
+    rows = [dict(r) for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return rows
+
+
+def get_dashboard_tasks(user):
+    """Taken voor het dashboard: vandaag, achterstallig, en binnenkort (7 dagen) voor deze gebruiker."""
+    conn = get_connection()
+    cur = _dict_cursor(conn)
+    cur.execute(
+        """
+        SELECT t.*, d.creditor_name
+        FROM tasks t
+        LEFT JOIN debts d ON d.id = t.related_debt_id
+        WHERE t.assigned_to = %s AND t.status = 'Open'
+          AND (t.due_date IS NULL OR t.due_date <= CURRENT_DATE + INTERVAL '7 days')
+        ORDER BY t.due_date ASC NULLS LAST, t.id DESC
+        """,
+        (user,),
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# ACTIVITEIT (voor dashboard)
+# ---------------------------------------------------------------------------
+
+def get_recent_activity(limit=8):
+    """Combineert recente communicatie-logs en betalingen tot één activiteitenlijst."""
+    conn = get_connection()
+    cur = _dict_cursor(conn)
+
+    cur.execute(
+        """SELECT dl.date, dl.note, dl.logged_by, d.creditor_name
+           FROM debt_logs dl JOIN debts d ON d.id = dl.debt_id
+           ORDER BY dl.date DESC, dl.id DESC LIMIT %s""",
+        (limit,),
+    )
+    logs = [dict(r) for r in cur.fetchall()]
+    for l in logs:
+        l["kind"] = "log"
+
+    cur.execute(
+        """SELECT p.date, p.amount, p.logged_by, d.creditor_name
+           FROM payments p JOIN debts d ON d.id = p.debt_id
+           ORDER BY p.date DESC, p.id DESC LIMIT %s""",
+        (limit,),
+    )
+    payments = [dict(r) for r in cur.fetchall()]
+    for p in payments:
+        p["kind"] = "payment"
+
+    cur.close()
+    conn.close()
+
+    combined = logs + payments
+    combined.sort(key=lambda x: x["date"], reverse=True)
+    return combined[:limit]
 
 
 # ---------------------------------------------------------------------------
