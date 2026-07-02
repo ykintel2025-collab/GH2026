@@ -8,8 +8,10 @@ Vereist st.secrets["DB_URL"] en st.secrets["credentials"].
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta
+from urllib.parse import quote
 import database as db
 import auth
+import emailer
 
 st.set_page_config(page_title="Asset Management Dashboard", layout="wide", page_icon="📊")
 
@@ -39,6 +41,43 @@ def prio_badge(p):
     return f"{colors.get(p, '⚪')} {p}"
 
 
+def whatsapp_link(phone, text=""):
+    """Bouwt een wa.me-link. Verwacht telefoonnummer met of zonder +/spaties;
+    een nummer dat met 0 begint wordt aangenomen als Nederlands (0 -> 31)."""
+    if not phone:
+        return None
+    digits = "".join(ch for ch in phone if ch.isdigit())
+    if digits.startswith("0"):
+        digits = "31" + digits[1:]
+    if not digits:
+        return None
+    url = f"https://wa.me/{digits}"
+    if text:
+        url += f"?text={quote(text)}"
+    return url
+
+
+def mailto_link(email, subject="", body=""):
+    if not email:
+        return None
+    url = f"mailto:{email}"
+    params = []
+    if subject:
+        params.append(f"subject={quote(subject)}")
+    if body:
+        params.append(f"body={quote(body)}")
+    if params:
+        url += "?" + "&".join(params)
+    return url
+
+
+def fill_template(text, debt):
+    """Vervangt {naam} in een sjabloon door de naam van de schuldeiser."""
+    if not text:
+        return text
+    return text.replace("{naam}", debt.get("creditor_name", ""))
+
+
 # --- Sidebar navigatie -----------------------------------------------------
 with st.sidebar:
     st.write(f"Ingelogd als **{current_user}**")
@@ -49,7 +88,7 @@ with st.sidebar:
     st.divider()
     page = st.radio(
         "Navigatie",
-        ["🏠 Dashboard", "📋 Schulden", "✅ Taken", "📈 Pipeline & Inkomsten", "💧 Liquiditeit"],
+        ["🏠 Dashboard", "📋 Schulden", "✅ Taken", "✉️ Berichten", "📈 Pipeline & Inkomsten", "💧 Liquiditeit"],
         label_visibility="collapsed",
     )
 
@@ -58,15 +97,7 @@ with st.sidebar:
 # ===========================================================================
 if page == "🏠 Dashboard":
     st.title(f"Welkom terug, {current_user} 👋")
-
-    totals = db.get_totals()
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Netto positie", eur(totals["net_position"]))
-    c2.metric("Schulden (open)", eur(totals["total_debt_current"]))
-    c3.metric("Inkomsten (totaal)", eur(totals["total_income"]))
-    c4.metric("Al afgelost", eur(db.get_total_paid()))
-
-    st.divider()
+    st.caption("Financieel overzicht vind je onder 📋 Schulden en 💧 Liquiditeit.")
 
     col_taken, col_activiteit = st.columns([1.3, 1])
 
@@ -152,10 +183,32 @@ elif page == "📋 Schulden":
                 total_amount = st.number_input("Hoofdsom oorspronkelijk", min_value=0.0, step=100.0)
                 current_amount = st.number_input("Actueel bedrag", min_value=0.0, step=100.0)
                 priority = st.selectbox("Prioriteit", PRIORITIES)
+                st.markdown("**Contactgegevens (optioneel)**")
+                address = st.text_input("Adres")
+                acol1, acol2 = st.columns(2)
+                postal_code = acol1.text_input("Postcode")
+                city = acol2.text_input("Plaats")
+                phone = st.text_input("Telefoonnummer", placeholder="06 12345678")
+                email = st.text_input("E-mailadres")
                 if st.form_submit_button("Toevoegen") and creditor_name:
-                    db.add_debt(creditor_name, total_amount, current_amount, priority)
+                    db.add_debt(
+                        creditor_name, total_amount, current_amount, priority,
+                        address=address or None, postal_code=postal_code or None,
+                        city=city or None, phone=phone or None, email=email or None,
+                    )
                     st.success(f"Schuld bij {creditor_name} toegevoegd.")
                     st.rerun()
+
+    totals = db.get_totals()
+    tc1, tc2, tc3, tc4 = st.columns(4)
+    tc1.metric("Netto positie", eur(totals["net_position"]))
+    tc2.metric("Schulden (open)", eur(totals["total_debt_current"]))
+    tc3.metric("Al afgelost", eur(db.get_total_paid()))
+    if totals["total_debt_original"] > 0:
+        afgelost = totals["total_debt_original"] - totals["total_debt_current"]
+        pct = max(0.0, min(1.0, afgelost / totals["total_debt_original"]))
+        tc4.metric("Voortgang sanering", f"{pct*100:.1f}%")
+    st.divider()
 
     fc1, fc2 = st.columns([1, 3])
     status_filter = fc1.radio("Filter", ["Alle", "Open", "Paid"], horizontal=True, label_visibility="collapsed")
@@ -170,7 +223,16 @@ elif page == "📋 Schulden":
     else:
         st.caption(f"{len(debts)} schuldeisers")
 
-        # Taken 1x ophalen en per schuld groeperen (i.p.v. per schuld opnieuw opvragen)
+        # Logs, betalingen en taken 1x ophalen en per schuld groeperen
+        # (i.p.v. voor elke schuldeiser apart de database te bevragen)
+        logs_by_debt = {}
+        for l in db.get_all_debt_logs():
+            logs_by_debt.setdefault(l["debt_id"], []).append(l)
+
+        payments_by_debt = {}
+        for p in db.get_all_payments():
+            payments_by_debt.setdefault(p["debt_id"], []).append(p)
+
         tasks_by_debt = {}
         for t in db.get_tasks():
             tasks_by_debt.setdefault(t["related_debt_id"], []).append(t)
@@ -213,10 +275,12 @@ elif page == "📋 Schulden":
                         st.rerun()
 
                 st.divider()
-                tab_log, tab_betaling, tab_taken = st.tabs(["📝 Communicatie", "💶 Betalingen", "✅ Taken"])
+                tab_log, tab_betaling, tab_taken, tab_contact = st.tabs(
+                    ["📝 Communicatie", "💶 Betalingen", "✅ Taken", "📇 Contact"]
+                )
 
                 with tab_log:
-                    logs = db.get_debt_logs(debt["id"])
+                    logs = logs_by_debt.get(debt["id"], [])
                     if logs:
                         for log in logs:
                             wie = f" — *{log['logged_by']}*" if log.get("logged_by") else ""
@@ -230,7 +294,7 @@ elif page == "📋 Schulden":
                             st.rerun()
 
                 with tab_betaling:
-                    payments = db.get_payments(debt["id"])
+                    payments = payments_by_debt.get(debt["id"], [])
                     if payments:
                         for p in payments:
                             st.write(f"- `{p['date']}` {eur(p['amount'])} betaald — *{p['logged_by']}*")
@@ -262,6 +326,61 @@ elif page == "📋 Schulden":
                         if st.form_submit_button("Taak toevoegen") and task_title:
                             db.add_task(task_title, task_assignee, current_user, due_date=task_due, related_debt_id=debt["id"])
                             st.rerun()
+
+                with tab_contact:
+                    ccol1, ccol2 = st.columns(2)
+                    with ccol1:
+                        with st.form(f"contact_form_{debt['id']}"):
+                            c_address = st.text_input("Adres", value=debt.get("address") or "")
+                            ac1, ac2 = st.columns(2)
+                            c_postal = ac1.text_input("Postcode", value=debt.get("postal_code") or "")
+                            c_city = ac2.text_input("Plaats", value=debt.get("city") or "")
+                            c_phone = st.text_input("Telefoonnummer", value=debt.get("phone") or "")
+                            c_email = st.text_input("E-mailadres", value=debt.get("email") or "")
+                            if st.form_submit_button("💾 Contactgegevens opslaan"):
+                                db.update_debt(
+                                    debt["id"], address=c_address or None, postal_code=c_postal or None,
+                                    city=c_city or None, phone=c_phone or None, email=c_email or None,
+                                )
+                                st.rerun()
+
+                    with ccol2:
+                        st.markdown("**Snel bericht sturen**")
+                        wa_templates = db.get_templates(channel="WhatsApp")
+                        mail_templates = db.get_templates(channel="Email")
+
+                        wa_options = {"— vrije tekst —": None}
+                        wa_options.update({t["name"]: t for t in wa_templates})
+                        wa_choice = st.selectbox("WhatsApp-sjabloon", list(wa_options.keys()), key=f"watpl_{debt['id']}")
+                        wa_default = fill_template(wa_options[wa_choice]["body"], debt) if wa_options[wa_choice] else ""
+                        wa_text = st.text_area("Bericht", value=wa_default, key=f"watext_{debt['id']}")
+                        wa_url = whatsapp_link(debt.get("phone"), wa_text)
+                        if wa_url:
+                            st.link_button("📱 Open in WhatsApp", wa_url)
+                        else:
+                            st.caption("Geen telefoonnummer bekend — vul dit links in om WhatsApp te kunnen gebruiken.")
+
+                        st.markdown("---")
+                        mail_options = {"— vrije tekst —": None}
+                        mail_options.update({t["name"]: t for t in mail_templates})
+                        mail_choice = st.selectbox("E-mailsjabloon", list(mail_options.keys()), key=f"mailtpl_{debt['id']}")
+                        mail_subject_default = fill_template(mail_options[mail_choice]["subject"], debt) if mail_options[mail_choice] else ""
+                        mail_body_default = fill_template(mail_options[mail_choice]["body"], debt) if mail_options[mail_choice] else ""
+                        mail_subject = st.text_input("Onderwerp", value=mail_subject_default or "", key=f"mailsub_{debt['id']}")
+                        mail_body = st.text_area("Bericht", value=mail_body_default, key=f"mailbody_{debt['id']}")
+                        if not debt.get("email"):
+                            st.caption("Geen e-mailadres bekend — vul dit links in om te kunnen versturen.")
+                        else:
+                            if st.button("✉️ Verstuur e-mail", key=f"sendmail_{debt['id']}"):
+                                success, error = emailer.send_email(debt["email"], mail_subject, mail_body)
+                                if success:
+                                    db.add_debt_log(
+                                        debt["id"], f"E-mail verzonden: '{mail_subject}'", logged_by=current_user
+                                    )
+                                    st.success(f"E-mail verzonden naar {debt['email']}.")
+                                    st.rerun()
+                                else:
+                                    st.error(f"Versturen mislukt: {error}")
 
 # ===========================================================================
 # PAGINA: TAKEN (volledig beheer)
@@ -314,6 +433,51 @@ elif page == "✅ Taken":
             if new_status != t["status"]:
                 db.update_task(t["id"], status=new_status)
                 st.rerun()
+
+# ===========================================================================
+# PAGINA: BERICHTEN (sjablonen voor mail & WhatsApp)
+# ===========================================================================
+elif page == "✉️ Berichten":
+    st.title("Berichtsjablonen")
+    st.caption(
+        "Standaardteksten voor WhatsApp en e-mail. Gebruik {naam} in de tekst — dat wordt automatisch "
+        "vervangen door de naam van de schuldeiser wanneer je een sjabloon gebruikt bij Schulden → Contact."
+    )
+
+    with st.popover("➕ Nieuw sjabloon"):
+        with st.form("add_template_form", clear_on_submit=True):
+            t_name = st.text_input("Naam van het sjabloon")
+            t_channel = st.selectbox("Kanaal", ["WhatsApp", "Email"])
+            t_subject = st.text_input("Onderwerp (alleen voor e-mail)")
+            t_body = st.text_area("Berichttekst", placeholder="Beste {naam}, ...")
+            if st.form_submit_button("Opslaan") and t_name and t_body:
+                db.add_template(t_name, t_channel, t_body, current_user, subject=t_subject or None)
+                st.rerun()
+
+    tab_wa, tab_mail = st.tabs(["📱 WhatsApp-sjablonen", "✉️ E-mailsjablonen"])
+
+    with tab_wa:
+        templates = db.get_templates(channel="WhatsApp")
+        if not templates:
+            st.info("Nog geen WhatsApp-sjablonen.")
+        for t in templates:
+            with st.expander(t["name"]):
+                st.write(t["body"])
+                if st.button("🗑️ Verwijderen", key=f"deltpl_wa_{t['id']}"):
+                    db.delete_template(t["id"])
+                    st.rerun()
+
+    with tab_mail:
+        templates = db.get_templates(channel="Email")
+        if not templates:
+            st.info("Nog geen e-mailsjablonen.")
+        for t in templates:
+            with st.expander(t["name"]):
+                st.caption(f"Onderwerp: {t['subject'] or '—'}")
+                st.write(t["body"])
+                if st.button("🗑️ Verwijderen", key=f"deltpl_mail_{t['id']}"):
+                    db.delete_template(t["id"])
+                    st.rerun()
 
 # ===========================================================================
 # PAGINA: PIPELINE & INKOMSTEN
