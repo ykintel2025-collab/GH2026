@@ -48,6 +48,19 @@ def get_download_url(storage_path, expires_in=3600):
         return None
 
 
+def download_file(storage_path):
+    """Haalt de ruwe inhoud van een bestand op (voor het als bijlage meesturen bij e-mail).
+    Retourneert de bytes, of None bij een fout."""
+    try:
+        url = f"{_base_url()}/object/{BUCKET}/{storage_path}"
+        resp = requests.get(url, headers=_headers(), timeout=30)
+        if resp.status_code == 200:
+            return resp.content
+        return None
+    except Exception:
+        return None
+
+
 def delete_file(storage_path):
     try:
         url = f"{_base_url()}/object/{BUCKET}/{storage_path}"
